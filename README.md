@@ -8,10 +8,7 @@ A Claude Code skill for TON blockchain smart contract security auditing, develop
 ## Installation
 
 ```bash
-# Install via superpowers CLI (if available)
-/skills install ton-best-practices
-
-# Or copy manually to ~/.claude/skills/ton-best-practices/
+npx skills add elsvv/ton-best-practices-skill
 ```
 
 ## What's inside

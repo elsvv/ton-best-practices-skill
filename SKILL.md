@@ -1,6 +1,11 @@
 ---
 name: ton-best-practices
-description: Use when auditing, reviewing, writing, or testing TON smart contracts in Tolk. Security vulnerabilities, async model pitfalls, bounce message handling, gas management, access control, serialization. Triggers: Tolk, TVM, TVM 12, TON contract, jetton, NFT TON, TON audit, bounce message, smart contract security.
+description: |
+  Use when auditing, reviewing, writing, or testing TON smart contracts in Tolk.
+  Security vulnerabilities, async model pitfalls, bounce message handling,
+  gas management, access control, serialization, audit checklists.
+  Triggers: Tolk, TVM, TVM 12, TON contract, jetton, NFT TON, TON audit,
+  bounce message, smart contract security.
 ---
 
 # TON Smart Contract Best Practices (Tolk)
