@@ -1,14 +1,44 @@
-# TON Smart Contract Audit Checklist
+# TON Smart Contract Audit Checklist (Tolk)
 
-Complete checklist based on 34 professional audit reports, PositiveSecurity guide, and TON official security documentation.
+Based on 34 audit reports, PositiveSecurity guide, TON official docs, and tolk-bench analysis.
+
+## Phase 0: Tolk Language Configuration
+
+### Compiler & Runtime
+- [ ] Tolk compiler version identified (target: 1.2.x / `@ton/tolk-js` v1.2.0)
+- [ ] TVM version confirmed (TVM 12 for Tolk 1.2 features)
+- [ ] All imports reviewed (no unexpected stdlib overrides)
+- [ ] Compiler flags and settings checked for security implications
+- [ ] `@overflow1023_policy("suppress")` annotations justified (struct fits in practice)
+
+### Struct & Storage Layout
+- [ ] Storage struct defined clearly (not raw cell parsing)
+- [ ] All `@lazy` fields documented and loading verified in handlers
+- [ ] Union types exhaustively matched (no hidden `else` branches accepting unknown opcodes)
+- [ ] All `@opcode` annotations unique across the contract and across union types
+
+### Type Safety
+- [ ] `address` vs `address?` vs `any_address` usage reviewed
+- [ ] No unsafe `as` casts from untrusted data (slices, cells)
+- [ ] No unsafe `!` force-unwrap on nullable values (throws exit code 7 on null)
+- [ ] Global variables initialized before first use
+
+### Message Configuration
+- [ ] `BounceMode` explicitly selected per message: `RichBounce` for stateful sends (Tolk 1.2)
+- [ ] `@onBouncedMessage` handler covers all sent message types
+- [ ] `assertEndAfterReading` not disabled (default: true)
+- [ ] Enum values validated during deserialization (auto-validated by Tolk)
+
+---
 
 ## Phase 1: Architecture Review
 
 ### Message Flow Mapping
 - [ ] Draw complete message flow diagram for all operations
-- [ ] Identify all entry points (recv_internal opcodes, recv_external, get methods)
+- [ ] Identify all entry points (`@onInternalMessage` handlers, `@onExternalMessage`, `@onTickTock`, get methods)
 - [ ] Map all inter-contract calls and their possible failure modes
 - [ ] Identify all state-changing operations across the entire flow
+- [ ] Union type message dispatch reviewed for completeness (all opcodes handled)
 
 ### Contract Design
 - [ ] No unnecessary admin centralization (single key can drain funds?)
@@ -16,29 +46,34 @@ Complete checklist based on 34 professional audit reports, PositiveSecurity guid
 - [ ] All operations can complete independently (each handler is atomic)
 - [ ] Account freezing prevention (adequate TON reserve maintained?)
 - [ ] Upgrade/migration path documented and secure
+- [ ] `contract.setCodePostponed()` requires multi-factor authorization or timelock
 
 ---
 
 ## Phase 2: Authorization & Access Control
 
 ### Internal Message Auth
-- [ ] All handlers extract and validate sender address from `in_msg_full`
+- [ ] All handlers extract and validate sender address via `in.senderAddress`
+- [ ] `address` type used (not `any_address`) to validate internal address format
 - [ ] Jetton operations verify wallet authenticity via master contract
 - [ ] Admin operations check sender against stored admin address
-- [ ] Workchain validated with `force_chain()` where applicable
+- [ ] Nullable admin pattern: no `!` force-unwrap on optional admin without null check
+- [ ] Workchain validated where applicable: `in.senderAddress.getWorkchain() == 0`
 
-### External Message Auth (recv_external)
-- [ ] Signature verification BEFORE `accept_message()`
+### External Message Auth (`@onExternalMessage`)
+- [ ] Signature verification BEFORE `acceptExternalMessage()`
 - [ ] Sequence number (seqno) checked and incremented
-- [ ] Valid-until timestamp checked (`throw_if(35, valid_until <= now())`)
+- [ ] Valid-until timestamp checked: `assert (validUntil > blockchain.now()) throw ERR_EXPIRED`
+- [ ] Time check performed BEFORE `acceptExternalMessage()`
 - [ ] Subwallet ID validated (prevents cross-wallet replay)
 - [ ] Signed data includes: recipient, amount, seqno, op (no partial signing)
+- [ ] Signature validation covers all body fields
 
 ### Code Update Protection
-- [ ] `set_code()` requires multi-factor authorization
+- [ ] `contract.setCodePostponed()` requires strict authorization
 - [ ] New code validated before applying
 - [ ] Storage migration handled for format changes
-- [ ] Upgrade effects only take place after current execution completes
+- [ ] Upgrade effects take place after current execution (postponed by default in Tolk)
 
 ---
 
@@ -51,11 +86,11 @@ Complete checklist based on 34 professional audit reports, PositiveSecurity guid
 - [ ] Carry-value pattern used (not cross-contract state queries)
 
 ### Bounced Message Handling
-- [ ] Every `send_raw_message()` with bounceable mode has corresponding bounce handler
+- [ ] Every outgoing bounceable message has a corresponding `@onBouncedMessage` handler
+- [ ] `BounceMode` explicitly set: `RichBounce` for full body recovery (Tolk 1.2), `Only256BitsOfBody` otherwise
 - [ ] Bounce handlers restore original state (undo state changes from failed step)
-- [ ] Bounce flag checked FIRST: `if (msg_flags & 1)`
-- [ ] Bounce body parsed correctly: skip 32-bit `0xFFFFFFFF` marker
-- [ ] Handlers designed knowing bounce = only 256 bits of original payload
+- [ ] Bounce body parsed correctly via `InMessageBounced` type and `.skipBouncedPrefix()`
+- [ ] `@on_bounced_policy("manual")` reviewed: contract handles or intentionally ignores bounces
 
 ### Race Condition Analysis
 - [ ] "What if attacker runs parallel flow during this operation?" for each multi-step op
@@ -68,24 +103,26 @@ Complete checklist based on 34 professional audit reports, PositiveSecurity guid
 ## Phase 4: Gas Management
 
 ### Per-Handler Validation
-- [ ] Each handler validates: `msg_value ≥ compute_fee + forward_fee + buffer`
+- [ ] Each handler validates: `msg_value >= compute_fee + forward_fee + buffer`
 - [ ] Gas calculated for most expensive execution path
 - [ ] Deployment flows include new contract storage fee reserve
 - [ ] Cross-shard messages account for additional routing cost
+- [ ] Gas constants recalibrated for Tolk (20-56% savings vs FunC may change thresholds)
 
 ### Gas Return
 - [ ] Excess gas returned to sender via excesses message (op `0xd53276db`)
-- [ ] Mode 64 + 2 used for excess return (not just mode 64 alone)
+- [ ] `SEND_MODE_PAY_FEES_SEPARATELY | SEND_MODE_BOUNCE_ON_ACTION_FAIL` used for excess return
 
 ### Data Structure Safety
-- [ ] No unbounded storage growth (dictionaries, lists)
+- [ ] No unbounded storage growth (maps, lists)
 - [ ] Loops have explicit bounds (`MAX_ITERATIONS`)
-- [ ] Dictionary traversal is bounded
+- [ ] Map traversal is bounded (`.findFirst()` / `.iterateNext()` loops have limits)
 
-### Mode 64 Trap Check
-- [ ] Contract doesn't emit external messages in same handler as mode 64 send
-- [ ] Contract doesn't accumulate storage fees while using mode 64
-- [ ] Multiple sends in one tx don't use mode 64 (only first gets "remaining")
+### Reserve + Send Mode Safety
+- [ ] `reserveToncoinsOnBalance` + `SEND_MODE_CARRY_ALL_BALANCE` (128) combination reviewed
+- [ ] Incorrect reservation cannot drain contract
+- [ ] Multiple sends in one tx don't use `SEND_MODE_CARRY_ALL_REMAINING_BALANCE` (only first gets "remaining")
+- [ ] Contract doesn't emit external messages in same handler as carry-remaining send
 
 ---
 
@@ -93,68 +130,105 @@ Complete checklist based on 34 professional audit reports, PositiveSecurity guid
 
 ### Integer Arithmetic
 - [ ] No division before multiplication (causes precision loss)
-- [ ] All subtraction checked for underflow (`throw_unless(cond, a >= b)`)
-- [ ] No signed/unsigned mixing (`load_int` vs `load_uint`)
-- [ ] No overflow in intermediate calculations (use `muldiv` for big numbers)
+- [ ] Use `mulDivFloor(a, b, c)` for safe big-number arithmetic
+- [ ] All subtraction checked for underflow: `assert (a >= b) throw ERR_UNDERFLOW`
+- [ ] Sized integer types (`uint32`, `uint64`, etc.) reviewed for silent arithmetic overflow
+- [ ] `coins` arithmetic: only `+` and `-` preserve `coins` type, other operators degrade to `int`
+- [ ] Overflow at serialization: values exceeding type width cause exit code 5
 
 ### Data Handling
-- [ ] `end_parse()` called after reading all storage/message slices
-- [ ] Store/load types consistent (same bit width, same sign)
+- [ ] `assertEndAfterReading` not set to false (ensures slices fully consumed)
+- [ ] `@lazy` fields validated after loading (security-relevant fields actually read)
+- [ ] No raw `as` casts from untrusted slice data
+- [ ] `Cell<T>` types used correctly (typed cell wrappers)
 - [ ] No sensitive data stored on-chain (passwords, keys, secrets)
-- [ ] Cell limits respected: ≤1023 bits, ≤4 refs per cell
+- [ ] Cell limits respected: <=1023 bits, <=4 refs per cell
 
 ### Loop Safety
 - [ ] No infinite loops possible
 - [ ] User-controlled loop bounds have hard caps
-- [ ] Loops over dictionaries have maximum iteration limits
+- [ ] Loops over maps have maximum iteration limits
 - [ ] No sending messages inside loops without bound
 
 ### Exit Codes
-- [ ] No `throw(0)` or `throw(1)` (reserved for normal exit!)
-- [ ] Custom error codes ≥256 (0-127 TVM, 128-255 Tact reserved)
+- [ ] No `assert ... throw 0` or `throw 1` (reserved for normal exit)
+- [ ] Custom error codes >= 256 (0-127 TVM reserved, 128-255 Tact reserved)
+- [ ] Force-unwrap `!` on null produces exit code 7 -- verify this is acceptable
 - [ ] All error codes documented with meanings
 
 ### Replay Protection
 - [ ] External messages use seqno
 - [ ] External messages use valid_until timestamp
 - [ ] Seqno incremented AFTER successful processing
+- [ ] `commitContractDataAndActions()` used to commit seqno before action processing
 
 ---
 
-## Phase 6: FunC-Specific Checks
+## Phase 6: Tolk-Specific Checks
 
-- [ ] ALL state-changing functions have `impure` modifier
-- [ ] `~` used for in-place modifications (NOT `.` on dict/slice)
-- [ ] Variable order in `load_data()` matches `save_data()` exactly
-- [ ] No variable name shadowing (local name same as storage field)
-- [ ] No variable redeclaration in same scope
-- [ ] `end_parse()` after reading storage
-- [ ] No third-party code execution without signature verification
-- [ ] `COMMIT` not called before all validation complete
-- [ ] Global variables not used for persistence (use c4)
-- [ ] Boolean comparisons use `!= 0` not `== true` (true = -1, not 1)
-- [ ] Method IDs don't conflict with built-ins (recv_internal=0, recv_external=-1)
+### Type System Safety
+- [ ] `address` type used for all sender/recipient fields (validates MsgAddressInt format)
+- [ ] `any_address` only used where `addr_none` is intentionally accepted
+- [ ] Nullable types (`address?`, `cell?`, `int?`) checked before use, not force-unwrapped
+- [ ] Sized integers (`uint32`, `uint64`, `coins`) match TL-B schema exactly
+- [ ] `RemainingBitsAndRefs` used correctly for pass-through payloads
+
+### Struct & Serialization
+- [ ] Storage struct layout matches on-chain data format
+- [ ] `@lazy` fields: security-relevant fields actually loaded before checks
+- [ ] `@lazy` fields: not accidentally skipped by compiler optimization
+- [ ] Union type `else =>` branches throw or are intentionally permissive
+- [ ] `@opcode` values unique within each union type
+- [ ] Generic structs (`Cell<T>`, `map<K,V>`) properly typed
+
+### Message Construction
+- [ ] `createMessage()` API used (not raw cell building) for type safety
+- [ ] `BounceMode` explicitly set for all stateful outgoing messages
+- [ ] `BounceMode.RichBounce` used for full body recovery (Tolk 1.2)
+- [ ] `BounceMode.NoBounce` only where delivery failure is acceptable
+- [ ] `AutoDeployAddress`: `stateInit` data matches deployed contract expectations
+- [ ] `sendRawMessage` calls: send mode validated (used for proxied messages)
+
+### Bounce Handling
+- [ ] `@onBouncedMessage` handler exists if contract sends bounceable messages
+- [ ] Union type message dispatch in bounce handler is exhaustive
+- [ ] `@on_bounced_policy("manual")` justified and fully implemented
+
+### State Management
+- [ ] `contract.setData()` / `contract.getData()` used correctly
+- [ ] `commitContractDataAndActions()` placement reviewed (replay protection)
+- [ ] Global variables not used for persistent state (use storage structs)
+- [ ] `contract.setCodePostponed()` has governance controls
 
 ---
 
-## Phase 7: Tact-Specific Checks
+## Phase 7: External Message Security
 
-- [ ] Function arguments are pass-by-value (mutations don't propagate)
-- [ ] `nativeRandom()` / `nativeRandomInterval()` used (not `randomInt()` / `random()`)
-- [ ] Custom exit codes ≥256 (not 128-255 reserved by Tact)
-- [ ] Variables initialized ONLY in `init()`, not at declaration
-- [ ] Trait variables modified only through trait methods
-- [ ] Explicit Int annotations for messages (`as coins`, `as uint256`, etc.)
-- [ ] TVM assembly blocks reviewed for safety
-- [ ] `bounced<T>` handlers implemented for all critical sent messages
-- [ ] Optional variables actually used as optional (or type removed)
-- [ ] No double initialization (declaration AND init() both set same var)
+### Validation Order (Critical)
+```
+1. Parse message body
+2. Check valid_until > blockchain.now()
+3. Check seqno matches stored seqno
+4. Verify signature with isSignatureValid(hash, signature, publicKey)
+5. acceptExternalMessage()       <-- gas payment starts here
+6. Increment seqno
+7. commitContractDataAndActions() <-- commit seqno for replay protection
+8. Process actions
+```
+
+### Tolk-Specific External Message Checks
+- [ ] `acceptExternalMessage()` called (not the FunC `accept_message()`)
+- [ ] Seqno + validUntil + signature all checked BEFORE `acceptExternalMessage()`
+- [ ] Signature validation covers all body fields (no partial signing)
+- [ ] `commitContractDataAndActions()` used to commit seqno before action processing
+- [ ] Empty `catch` blocks reviewed: failed actions must not silently consume seqno
+- [ ] `try/catch` around action execution reviewed for seqno increment correctness
 
 ---
 
 ## Phase 8: Randomness
 
-- [ ] No `random()` without `randomize_lt()` first (FunC)
+- [ ] No `random()` without `randomizeBySeedAndLogicalTime()` first
 - [ ] No randomness in external message receivers
 - [ ] High-value randomness uses commit-reveal with collateral
 - [ ] Validator manipulation considered (1/250 validator = 0.4% block influence)
@@ -165,17 +239,19 @@ Complete checklist based on 34 professional audit reports, PositiveSecurity guid
 
 ### Jetton Security
 - [ ] Jetton wallet authenticity verified (calculate and compare address)
-- [ ] Minter bounce handler decrements `total_supply` on failed mint
+- [ ] Minter bounce handler decrements `totalSupply` on failed mint
 - [ ] Transfer failure (bounce) restores sender balance
-- [ ] `op::transfer_notification` validated for authenticity
+- [ ] Transfer notification validated for authenticity
 - [ ] TEP-74 message format followed exactly
-- [ ] Non-bounceable flag (`0x10`) NOT used for transfers (use `0x18`)
+- [ ] Non-bounceable flag NOT used for transfers (use bounceable mode)
+- [ ] `coins` type used for all token amounts
 
 ### NFT Security
 - [ ] Ownership transfer validated with authorization
 - [ ] Minting uses secure randomness for attributes (commit-reveal)
 - [ ] Metadata immutability considered (on-chain vs off-chain)
 - [ ] TEP-62 compliance checked
+- [ ] Initialization detection logic is robust (not fragile ref-counting)
 
 ### Exchange / DEX Specific
 - [ ] Check both `in_msgs` AND `out_msgs` (false deposit detection)
@@ -196,25 +272,63 @@ Complete checklist based on 34 professional audit reports, PositiveSecurity guid
 - [ ] Storage layout documented
 - [ ] Message format documented
 - [ ] Error codes documented
+- [ ] `@deprecated` functions reviewed for continued use
 
 ---
 
 ## Red Flags (Automatic Review Required)
 
-Any of these require immediate deep investigation:
+Any of these require immediate investigation:
 
-- `accept_message()` appears before any validation
-- Function missing `impure` but modifying state or sending messages
-- `.` used on dictionary operations instead of `~`
+- `acceptExternalMessage()` appears before any validation
+- `!` force-unwrap on nullable from untrusted input
+- `as` cast from untrusted slice/cell data
+- `else =>` in union match that silently accepts unknown opcodes
 - Loop with no bound check
-- `set_code()` or `set_data()` without strict auth
-- `send_raw_message(msg, 128)` without auth gate
-- Missing `bounce handler` for any send to another contract
-- `random()` without `randomize_lt()`
+- `contract.setCodePostponed()` or `contract.setData()` without strict auth
+- `SEND_MODE_CARRY_ALL_BALANCE` (128) without auth gate
+- Missing `@onBouncedMessage` handler for any bounceable send
+- `random()` without `randomizeBySeedAndLogicalTime()`
 - Arithmetic subtraction without underflow check
 - Cross-contract "query" pattern (should be carry-value instead)
-- `COMMIT` instruction before validation complete
+- `commitContractDataAndActions()` before validation complete
 - Global variables used for persistent state
+- `@on_bounced_policy("manual")` without explicit bounce handling
+- `sendRawMessage` with unvalidated send mode
+- `assertEndAfterReading` set to false without justification
+- `@overflow1023_policy("suppress")` without size analysis
+
+---
+
+## Tolk Version Compatibility
+
+Verify target Tolk version -- security features differ:
+
+### Tolk 1.0
+- `@lazy` loading (deferred deserialization for gas savings)
+- Auto-serialization via struct definitions
+- New entrypoints: `@onInternalMessage`, `@onExternalMessage`, `@onTickTock`
+- `createMessage()` API for typed message construction
+- `acceptExternalMessage()` replaces FunC `accept_message()`
+- `contract.setData()` / `contract.getData()` replace `set_data()` / `get_data()`
+- `assert ... throw` replaces `throw_unless` / `throw_if`
+- Method syntax `.method()` replaces FunC `~method()` tilde calls
+
+### Tolk 1.1
+- `map<K,V>` typed dictionaries with `.set()`, `.exists()`, `.delete()`
+- Enum validation during deserialization (automatic)
+- `private` / `readonly` field modifiers
+- Stricter type aliases (sized integers enforced)
+- `@deprecated` annotation for migration warnings
+
+### Tolk 1.2
+- `BounceMode.RichBounce` for full message body recovery in bounce handlers
+- `address` type validates MsgAddressInt format (rejects addr_none)
+- Borrow checker for `mutate` parameters (prevents aliasing bugs)
+- Anonymous functions (closures)
+- TVM 12 instruction support
+
+**Audit note**: Tolk 1.2 requires TVM 12. Verify deployment environment matches contract's target version.
 
 ---
 
@@ -228,5 +342,4 @@ Any of these require immediate deep investigation:
 | **Low** | Minor financial impact, deviation from best practices |
 | **Informational** | Style, documentation, non-exploitable inefficiency |
 
-From real audits: 70% of reports had logical errors or access control issues.
-Most common findings by frequency: logical errors (70), auth (25), centralization (19), documentation (23).
+From 34 audits: logical errors (70), auth (25), documentation (23), centralization (19). 70% of reports had logic or access control issues.
